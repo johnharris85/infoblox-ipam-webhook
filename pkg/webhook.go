@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/cluster-api-provider-vsphere/api/v1alpha3"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	"strings"
 )
 
 // +kubebuilder:webhook:path=/infoblox-ipam,mutating=true,failurePolicy=fail,groups="infrastructure.cluster.x-k8s.io",resources=vspheremachines,verbs=create;delete,versions=v1alpha3,name=mutating.infoblox.ipam.vspheremachines.infrastructure.cluster.x-k8s.io
@@ -49,13 +50,28 @@ func (w *Webhook) Handle(ctx context.Context, req admission.Request) admission.R
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
-	if _, ok := vm.Annotations[w.InfobloxAnnotation]; !ok {
-		marshaledVM, err := json.Marshal(vm)
-		if err != nil {
-			return admission.Errored(http.StatusInternalServerError, err)
+	marshaledVM, err := json.Marshal(vm)
+	doWeCare := false
+
+	for _, device := range vm.Spec.VirtualMachineCloneSpec.Network.Devices {
+		for _, ip := range device.IPAddrs {
+			if strings.HasPrefix(ip, "infoblox") {
+				doWeCare = true
+			}
 		}
-		admission.PatchResponseFromRaw(req.Object.Raw, marshaledVM)
 	}
+
+	if !doWeCare {
+		return admission.PatchResponseFromRaw(req.Object.Raw, marshaledVM)
+	}
+
+	//if _, ok := vm.Annotations[w.InfobloxAnnotation]; !ok {
+	//	marshaledVM, err := json.Marshal(vm)
+	//	if err != nil {
+	//		return admission.Errored(http.StatusInternalServerError, err)
+	//	}
+	//	admission.PatchResponseFromRaw(req.Object.Raw, marshaledVM)
+	//}
 
 	infobloxSecret := &corev1.Secret{}
 	secret := types.NamespacedName{
@@ -82,8 +98,10 @@ func (w *Webhook) Handle(ctx context.Context, req admission.Request) admission.R
 	if err != nil {
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
+	//cmpType = cloud management platform
+	objMgr := infoblox.NewObjectManager(conn, infobloxConfig.Data["cmpType"], infobloxConfig.Data["tenantID"])
 
-	objMgr := infoblox.NewObjectManager(conn, "CAPV-IPAM-Webhook", "VMware")
+	"infoblox:<netview>:<cidr>"
 
 	if req.Operation == admissionv1beta1.Create {
 		addr, err := objMgr.AllocateIP(
@@ -92,7 +110,7 @@ func (w *Webhook) Handle(ctx context.Context, req admission.Request) admission.R
 			"",
 			"",
 			"<comes_from_spec?>",
-			"<comes_from_spec?>",
+			"",
 		)
 		if err != nil {
 			return admission.Errored(http.StatusInternalServerError, err)
