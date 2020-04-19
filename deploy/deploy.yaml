@@ -1,0 +1,194 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infoblox
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infoblox-role
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - events
+      - secrets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - infrastructure.cluster.x-k8s.io
+    resources:
+      - vspheremachines
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infoblox-proxy-role
+rules:
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infoblox-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infoblox-role
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: infoblox
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infoblox-proxy-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infoblox-proxy-role
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: infoblox
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: infoblox-ipam-webhook-service
+  namespace: infoblox
+spec:
+  ports:
+    - port: 443
+      targetPort: webhook-server
+  selector:
+    webhook: infoblox-ipam
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    webhook: infoblox-ipam
+  name: infoblox-ipam-webhook
+  namespace: infoblox
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      webhook: infoblox-ipam
+  template:
+    metadata:
+      labels:
+        webhook: infoblox-ipam
+    spec:
+      containers:
+        - args:
+            - --secure-listen-address=0.0.0.0:8443
+            - --upstream=http://127.0.0.1:8080/
+            - --logtostderr=true
+            - --v=10
+          image: gcr.io/kubebuilder/kube-rbac-proxy:v0.4.1
+          name: kube-rbac-proxy
+          ports:
+            - containerPort: 8443
+              name: https
+        - args:
+            - --v=10
+#            - --metrics-addr=127.0.0.1:8080
+#            - --webhook-port=9443
+          command:
+            - /webhook
+          image: johnharris85/infoblox-ipam-webhook:master
+          name: webhook
+          ports:
+            - containerPort: 7443
+              name: webhook-server
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /tmp/k8s-webhook-server/serving-certs
+              name: cert
+              readOnly: true
+      terminationGracePeriodSeconds: 10
+      tolerations:
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/master
+      volumes:
+        - name: cert
+          secret:
+            defaultMode: 420
+            secretName: infoblox-webhook-service-cert
+---
+apiVersion: cert-manager.io/v1alpha2
+kind: Certificate
+metadata:
+  name: infoblox-serving-cert
+  namespace: infoblox
+spec:
+  dnsNames:
+    - infoblox-ipam-webhook-service.infoblox.svc
+    - infoblox-ipam-webhook-service.infoblox.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: infoblox-issuer
+  secretName: infoblox-webhook-service-cert
+---
+apiVersion: cert-manager.io/v1alpha2
+kind: Issuer
+metadata:
+  name: infoblox-issuer
+  namespace: infoblox
+spec:
+  selfSigned: {}
+---
+apiVersion: admissionregistration.k8s.io/v1beta1
+kind: MutatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: infoblox/infoblox-serving-cert
+  name: infoblox-mutating-webhook-configuration
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: infoblox-ipam-webhook-service
+        namespace: infoblox
+        path: /infoblox-ipam
+    failurePolicy: Fail
+    name: mutating.infoblox.ipam.vspheremachines.infrastructure.cluster.x-k8s.io
+    rules:
+      - apiGroups:
+          - infrastructure.cluster.x-k8s.io
+        apiVersions:
+          - v1alpha3
+        operations:
+          - CREATE
+          - DELETE
+        resources:
+          - vspheremachines

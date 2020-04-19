@@ -1,0 +1,21 @@
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha3
+kind: VSphereMachine
+metadata:
+  name: vsphere-controlplane-0
+  labels:
+    cluster.x-k8s.io/control-plane: "true"
+    cluster.x-k8s.io/cluster-name: "bpo"
+spec:
+  datacenter: "dc1"
+  network:
+    devices:
+    - networkName: "network_test"
+      dhcp4: false
+      dhcp6: false
+      ipAddrs:
+      - "notus"
+      - "infoblox:somenetview:somecidr"
+  numCPUs: 3
+  memoryMiB: 40
+  diskGiB: 40
+  template: "t1"

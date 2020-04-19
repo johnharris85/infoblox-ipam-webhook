@@ -37,20 +37,21 @@ func main() {
 		infobloxConfigMap          string
 		infobloxConfigMapNamespace string
 		infobloxAnnotation         string
+		infobloxPrefix             string
 	)
 
 	flag.StringVar(
 		&infobloxConfigMap,
 		"configName",
 		"webhook-config",
-		"Name of the configmap containing Infoblox connection details.",
+		"Name of the configmap containing Infoblox connection / config details.",
 	)
 
 	flag.StringVar(
 		&infobloxConfigMapNamespace,
 		"configNamespace",
 		"infoblox",
-		"Name of the namespace containing the configmap with Infoblox connection details.",
+		"Name of the namespace containing the configmap with Infoblox connection / config details.",
 	)
 
 	flag.StringVar(
@@ -74,9 +75,16 @@ func main() {
 		"Name of the annotation containing Infoblox allocation information.",
 	)
 
+	flag.StringVar(
+		&infobloxPrefix,
+		"prefix",
+		"infoblox",
+		"Name of the prefix to look for in the IPAddr field.",
+	)
+
 	// Setup a Manager
 	entryLog.Info("setting up manager")
-	mgr, err := manager.New(config.GetConfigOrDie(), manager.Options{})
+	mgr, err := manager.New(config.GetConfigOrDie(), manager.Options{Port: 7443})
 	if err != nil {
 		entryLog.Error(err, "unable to set up overall controller manager")
 		os.Exit(1)
@@ -94,6 +102,7 @@ func main() {
 		InfobloxConfigMap:          infobloxConfigMap,
 		InfobloxConfigMapNamespace: infobloxConfigMapNamespace,
 		InfobloxAnnotation:         infobloxAnnotation,
+		InfobloxPrefix:             infobloxPrefix,
 	}})
 
 	entryLog.Info("starting manager")

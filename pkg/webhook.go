@@ -18,8 +18,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	infoblox "github.com/infobloxopen/infoblox-go-client"
+	ib "github.com/infobloxopen/infoblox-go-client"
 	admissionv1beta1 "k8s.io/api/admission/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -31,6 +32,8 @@ import (
 
 // +kubebuilder:webhook:path=/infoblox-ipam,mutating=true,failurePolicy=fail,groups="infrastructure.cluster.x-k8s.io",resources=vspheremachines,verbs=create;delete,versions=v1alpha3,name=mutating.infoblox.ipam.vspheremachines.infrastructure.cluster.x-k8s.io
 
+var log = logf.Log.WithName("infoblox-webhook")
+
 type Webhook struct {
 	Client                     client.Client
 	InfobloxSecretName         string
@@ -38,41 +41,48 @@ type Webhook struct {
 	InfobloxConfigMapNamespace string
 	InfobloxConfigMap          string
 	InfobloxAnnotation         string
+	InfobloxPrefix string
 	decoder                    *admission.Decoder
 }
 
 // Handle
 func (w *Webhook) Handle(ctx context.Context, req admission.Request) admission.Response {
 	vm := &v1alpha3.VSphereMachine{}
-
 	err := w.decoder.Decode(req, vm)
 	if err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
-	marshaledVM, err := json.Marshal(vm)
-	doWeCare := false
+	log.V(5).Info(fmt.Sprintf("captured %s request for %s", req.Operation, vm.Name))
 
+	// Escape as soon as we can if we shouldn't handle the delete request
+	_, ok := vm.Annotations[w.InfobloxAnnotation]
+	if req.Operation == admissionv1beta1.Delete && !ok {
+		// marshaledVM, err := json.Marshal(vm)
+		//if err != nil {
+		//	return admission.Errored(http.StatusBadRequest, err)
+		//}
+		log.V(2).Info("delete operation and no annotation found")
+		return admission.Allowed("")
+	}
+
+	// Escape as soon as we can if we shouldn't handle the create request.
+	var ipsContainInfobloxPrefix bool
 	for _, device := range vm.Spec.VirtualMachineCloneSpec.Network.Devices {
 		for _, ip := range device.IPAddrs {
-			if strings.HasPrefix(ip, "infoblox") {
-				doWeCare = true
+			log.V(4).Info(fmt.Sprintf("checking IP: %s", ip))
+			if strings.Split(ip, ":")[0] == w.InfobloxPrefix {
+				ipsContainInfobloxPrefix = true
 			}
 		}
 	}
 
-	if !doWeCare {
-		return admission.PatchResponseFromRaw(req.Object.Raw, marshaledVM)
+	if !ipsContainInfobloxPrefix {
+		log.V(2).Info("create operation and no IPs with prefix found")
+		return admission.Allowed("")
 	}
 
-	//if _, ok := vm.Annotations[w.InfobloxAnnotation]; !ok {
-	//	marshaledVM, err := json.Marshal(vm)
-	//	if err != nil {
-	//		return admission.Errored(http.StatusInternalServerError, err)
-	//	}
-	//	admission.PatchResponseFromRaw(req.Object.Raw, marshaledVM)
-	//}
-
+	// Retrieve the Secret containing username / password for Infoblox.
 	infobloxSecret := &corev1.Secret{}
 	secret := types.NamespacedName{
 		Namespace: w.InfobloxSecretNamespace,
@@ -83,6 +93,7 @@ func (w *Webhook) Handle(ctx context.Context, req admission.Request) admission.R
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 
+	// Retrieve the ConfigMap containing configuration for Infoblox.
 	infobloxConfig := &corev1.ConfigMap{}
 	config := types.NamespacedName{
 		Namespace: w.InfobloxConfigMapNamespace,
@@ -98,32 +109,17 @@ func (w *Webhook) Handle(ctx context.Context, req admission.Request) admission.R
 	if err != nil {
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
-	//cmpType = cloud management platform
-	objMgr := infoblox.NewObjectManager(conn, infobloxConfig.Data["cmpType"], infobloxConfig.Data["tenantID"])
 
-	"infoblox:<netview>:<cidr>"
+	objMgr := ib.NewObjectManager(conn, infobloxConfig.Data["cmpType"], infobloxConfig.Data["tenantID"])
 
 	if req.Operation == admissionv1beta1.Create {
-		addr, err := objMgr.AllocateIP(
-			"<comes_from_field?>",
-			"<comes_from_field?>",
-			"",
-			"",
-			"<comes_from_spec?>",
-			"",
-		)
-		if err != nil {
-			return admission.Errored(http.StatusInternalServerError, err)
-		}
-		fmt.Println(addr.IPAddress)
+		w.populateIPs(vm, objMgr)
+		log.V(5).Info(fmt.Sprintf("after create - %s", vm))
 	}
 
 	if req.Operation == admissionv1beta1.Delete {
-
-	}
-
-	if vm.Annotations == nil {
-		vm.Annotations = map[string]string{}
+		w.cleanupIPs(vm, objMgr)
+		log.V(5).Info(fmt.Sprintf("after delete - %s", vm))
 	}
 
 	marshaledVM, err := json.Marshal(vm)
@@ -140,16 +136,59 @@ func (w *Webhook) InjectDecoder(d *admission.Decoder) error {
 	return nil
 }
 
-func setupInfobloxConnector(config corev1.ConfigMap, secret corev1.Secret) (*infoblox.Connector, error) {
-	hostConfig := infoblox.HostConfig{
+func (w *Webhook) populateIPs(vm *v1alpha3.VSphereMachine, objMgr *ib.ObjectManager) error {
+	if vm.Annotations == nil {
+		vm.Annotations = map[string]string{w.InfobloxAnnotation: ""}
+	}
+	var ipAddrAnnotation []string
+	for deviceIdx, device := range vm.Spec.VirtualMachineCloneSpec.Network.Devices { // check this if weird
+		for ipIdx, ip := range device.IPAddrs {
+			if strings.HasPrefix(ip, "infoblox") {
+				// Format - "infoblox:<netview>:<cidr>"
+				splitIP := strings.Split(ip, ":")
+				addr, err := objMgr.AllocateIP(
+					splitIP[1],
+					splitIP[2],
+					"",
+					"",
+					fmt.Sprintf("%s-%d-%d", vm.Name, deviceIdx, ipIdx),
+					ib.EA{},
+				)
+				if err != nil {
+					return err
+				}
+				device.IPAddrs[ipIdx] = addr.IPAddress
+				ipAddrAnnotation = append(ipAddrAnnotation, ip)
+			}
+		}
+	}
+	vm.Annotations[w.InfobloxAnnotation] = strings.Join(ipAddrAnnotation, ",")
+	return nil
+}
+
+func (w *Webhook) cleanupIPs(vm *v1alpha3.VSphereMachine, objMgr *ib.ObjectManager) error {
+	ipAddrsToRemove := strings.Split(vm.Annotations[w.InfobloxAnnotation], ",")
+	for _, ip := range ipAddrsToRemove {
+		splitIP := strings.Split(ip, ":")
+		_, err := objMgr.ReleaseIP(splitIP[1], splitIP[2], splitIP[0], ib.MACADDR_ZERO)
+		if err != nil {
+			return err
+		}
+	}
+	delete(vm.Annotations, w.InfobloxAnnotation)
+	return nil
+}
+
+func setupInfobloxConnector(config corev1.ConfigMap, secret corev1.Secret) (*ib.Connector, error) {
+	hostConfig := ib.HostConfig{
 		Host:     config.Data["host"],
 		Version:  config.Data["version"],
 		Port:     config.Data["port"],
 		Username: string(secret.Data["username"]),
 		Password: string(secret.Data["password"]),
 	}
-	transportConfig := infoblox.NewTransportConfig("true", 20, 10)
-	requestBuilder := &infoblox.WapiRequestBuilder{}
-	requestor := &infoblox.WapiHttpRequestor{}
-	return infoblox.NewConnector(hostConfig, transportConfig, requestBuilder, requestor)
+	transportConfig := ib.NewTransportConfig("true", 20, 10)
+	requestBuilder := &ib.WapiRequestBuilder{}
+	requestor := &ib.WapiHttpRequestor{}
+	return ib.NewConnector(hostConfig, transportConfig, requestBuilder, requestor)
 }
