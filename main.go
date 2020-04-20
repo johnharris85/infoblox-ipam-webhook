@@ -14,8 +14,12 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
+	ib "github.com/infobloxopen/infoblox-go-client"
 	ipam "github.com/johnharris85/infoblox-ipam-webhook/pkg"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"os"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -94,15 +98,44 @@ func main() {
 	entryLog.Info("setting up webhook server")
 	hookServer := mgr.GetWebhookServer()
 
+	k8sClient := mgr.GetClient()
+
+	sec := corev1.Secret{}
+	secret := types.NamespacedName{
+		Namespace: infobloxSecretNamespace,
+		Name:      infobloxSecretName,
+	}
+	err = k8sClient.Get(context.Background(), secret, &sec)
+	if err != nil {
+		entryLog.Error(err, "unable to retrieve infoblox secret")
+		os.Exit(1)
+	}
+
+	cm := corev1.ConfigMap{}
+	config := types.NamespacedName{
+		Namespace: infobloxConfigMapNamespace,
+		Name:      infobloxConfigMap,
+	}
+	err = k8sClient.Get(context.Background(), config, &cm)
+	if err != nil {
+		entryLog.Error(err, "unable to retrieve infoblox configmap")
+		os.Exit(1)
+	}
+
+	conn, err := setupInfobloxConnector(cm, sec)
+	defer conn.Logout()
+	if err != nil {
+		entryLog.Error(err, "unable to setup infoblox connector")
+		os.Exit(1)
+	}
+
 	entryLog.Info("registering webhooks to the webhook server")
 	hookServer.Register("/infoblox-ipam", &webhook.Admission{Handler: &ipam.Webhook{
-		Client:                     mgr.GetClient(),
-		InfobloxSecretName:         infobloxSecretName,
-		InfobloxSecretNamespace:    infobloxSecretNamespace,
-		InfobloxConfigMap:          infobloxConfigMap,
-		InfobloxConfigMapNamespace: infobloxConfigMapNamespace,
-		InfobloxAnnotation:         infobloxAnnotation,
-		InfobloxPrefix:             infobloxPrefix,
+		Client:             k8sClient,
+		InfobloxConnector:  conn,
+		InfobloxConfigMap:  &cm,
+		InfobloxAnnotation: infobloxAnnotation,
+		InfobloxPrefix:     infobloxPrefix,
 	}})
 
 	entryLog.Info("starting manager")
@@ -110,4 +143,18 @@ func main() {
 		entryLog.Error(err, "unable to run manager")
 		os.Exit(1)
 	}
+}
+
+func setupInfobloxConnector(config corev1.ConfigMap, secret corev1.Secret) (*ib.Connector, error) {
+	hostConfig := ib.HostConfig{
+		Host:     config.Data["host"],
+		Version:  config.Data["version"],
+		Port:     config.Data["port"],
+		Username: string(secret.Data["username"]),
+		Password: string(secret.Data["password"]),
+	}
+	transportConfig := ib.NewTransportConfig("true", 20, 10)
+	requestBuilder := &ib.WapiRequestBuilder{}
+	requestor := &ib.WapiHttpRequestor{}
+	return ib.NewConnector(hostConfig, transportConfig, requestBuilder, requestor)
 }

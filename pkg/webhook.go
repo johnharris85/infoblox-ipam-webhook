@@ -23,7 +23,6 @@ import (
 	ib "github.com/infobloxopen/infoblox-go-client"
 	admissionv1beta1 "k8s.io/api/admission/v1beta1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/cluster-api-provider-vsphere/api/v1alpha3"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -35,14 +34,12 @@ import (
 var log = logf.Log.WithName("infoblox-webhook")
 
 type Webhook struct {
-	Client                     client.Client
-	InfobloxSecretName         string
-	InfobloxSecretNamespace    string
-	InfobloxConfigMapNamespace string
-	InfobloxConfigMap          string
-	InfobloxAnnotation         string
-	InfobloxPrefix string
-	decoder                    *admission.Decoder
+	Client             client.Client
+	InfobloxConnector  *ib.Connector
+	InfobloxConfigMap  *corev1.ConfigMap
+	InfobloxAnnotation string
+	InfobloxPrefix     string
+	decoder            *admission.Decoder
 }
 
 // Handle
@@ -82,44 +79,16 @@ func (w *Webhook) Handle(ctx context.Context, req admission.Request) admission.R
 		return admission.Allowed("")
 	}
 
-	// Retrieve the Secret containing username / password for Infoblox.
-	infobloxSecret := &corev1.Secret{}
-	secret := types.NamespacedName{
-		Namespace: w.InfobloxSecretNamespace,
-		Name:      w.InfobloxSecretName,
-	}
-	err = w.Client.Get(ctx, secret, infobloxSecret)
-	if err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-
-	// Retrieve the ConfigMap containing configuration for Infoblox.
-	infobloxConfig := &corev1.ConfigMap{}
-	config := types.NamespacedName{
-		Namespace: w.InfobloxConfigMapNamespace,
-		Name:      w.InfobloxConfigMap,
-	}
-	err = w.Client.Get(ctx, config, infobloxConfig)
-	if err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-
-	conn, err := setupInfobloxConnector(*infobloxConfig, *infobloxSecret)
-	defer conn.Logout()
-	if err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-
-	objMgr := ib.NewObjectManager(conn, infobloxConfig.Data["cmpType"], infobloxConfig.Data["tenantID"])
+	objMgr := ib.NewObjectManager(w.InfobloxConnector, w.InfobloxConfigMap.Data["cmpType"], w.InfobloxConfigMap.Data["tenantID"])
 
 	if req.Operation == admissionv1beta1.Create {
 		w.populateIPs(vm, objMgr)
-		log.V(5).Info(fmt.Sprintf("after create - %s", vm))
+		log.V(5).Info(fmt.Sprintf("after create - %v", vm))
 	}
 
 	if req.Operation == admissionv1beta1.Delete {
 		w.cleanupIPs(vm, objMgr)
-		log.V(5).Info(fmt.Sprintf("after delete - %s", vm))
+		log.V(5).Info(fmt.Sprintf("after delete - %v", vm))
 	}
 
 	marshaledVM, err := json.Marshal(vm)
@@ -136,12 +105,12 @@ func (w *Webhook) InjectDecoder(d *admission.Decoder) error {
 	return nil
 }
 
-func (w *Webhook) populateIPs(vm *v1alpha3.VSphereMachine, objMgr *ib.ObjectManager) error {
+func (w *Webhook) populateIPs(vm *v1alpha3.VSphereMachine, objMgr infobloxObjectManager) error {
 	if vm.Annotations == nil {
 		vm.Annotations = map[string]string{w.InfobloxAnnotation: ""}
 	}
 	var ipAddrAnnotation []string
-	for deviceIdx, device := range vm.Spec.VirtualMachineCloneSpec.Network.Devices { // check this if weird
+	for deviceIdx, device := range vm.Spec.VirtualMachineCloneSpec.Network.Devices {
 		for ipIdx, ip := range device.IPAddrs {
 			if strings.HasPrefix(ip, "infoblox") {
 				// Format - "infoblox:<netview>:<cidr>"
@@ -166,7 +135,7 @@ func (w *Webhook) populateIPs(vm *v1alpha3.VSphereMachine, objMgr *ib.ObjectMana
 	return nil
 }
 
-func (w *Webhook) cleanupIPs(vm *v1alpha3.VSphereMachine, objMgr *ib.ObjectManager) error {
+func (w *Webhook) cleanupIPs(vm *v1alpha3.VSphereMachine, objMgr infobloxObjectManager) error {
 	ipAddrsToRemove := strings.Split(vm.Annotations[w.InfobloxAnnotation], ",")
 	for _, ip := range ipAddrsToRemove {
 		splitIP := strings.Split(ip, ":")
@@ -177,18 +146,4 @@ func (w *Webhook) cleanupIPs(vm *v1alpha3.VSphereMachine, objMgr *ib.ObjectManag
 	}
 	delete(vm.Annotations, w.InfobloxAnnotation)
 	return nil
-}
-
-func setupInfobloxConnector(config corev1.ConfigMap, secret corev1.Secret) (*ib.Connector, error) {
-	hostConfig := ib.HostConfig{
-		Host:     config.Data["host"],
-		Version:  config.Data["version"],
-		Port:     config.Data["port"],
-		Username: string(secret.Data["username"]),
-		Password: string(secret.Data["password"]),
-	}
-	transportConfig := ib.NewTransportConfig("true", 20, 10)
-	requestBuilder := &ib.WapiRequestBuilder{}
-	requestor := &ib.WapiHttpRequestor{}
-	return ib.NewConnector(hostConfig, transportConfig, requestBuilder, requestor)
 }

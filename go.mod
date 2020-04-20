@@ -3,11 +3,14 @@ module github.com/johnharris85/infoblox-ipam-webhook
 go 1.13
 
 require (
+	github.com/davecgh/go-spew v1.1.1
 	github.com/go-logr/zapr v0.1.1 // indirect
 	github.com/golang/protobuf v1.4.0 // indirect
 	github.com/imdario/mergo v0.3.9 // indirect
 	github.com/infobloxopen/infoblox-go-client v1.1.0
 	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
+	github.com/onsi/ginkgo v1.12.0
+	github.com/onsi/gomega v1.9.0
 	github.com/prometheus/client_golang v1.5.1 // indirect
 	github.com/prometheus/procfs v0.0.11 // indirect
 	github.com/sirupsen/logrus v1.5.0 // indirect
