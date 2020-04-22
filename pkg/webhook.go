@@ -113,21 +113,22 @@ func (w *Webhook) populateIPs(vm *v1alpha3.VSphereMachine, objMgr infobloxObject
 	for deviceIdx, device := range vm.Spec.VirtualMachineCloneSpec.Network.Devices {
 		for ipIdx, ip := range device.IPAddrs {
 			if strings.HasPrefix(ip, "infoblox") {
-				// Format - "infoblox:<netview>:<cidr>"
+				// Format - "infoblox:<netview>:<cidr>" TODO: Do we need DNSView?
 				splitIP := strings.Split(ip, ":")
-				addr, err := objMgr.AllocateIP(
-					splitIP[1],
-					splitIP[2],
-					"",
-					"",
-					fmt.Sprintf("%s-%d-%d", vm.Name, deviceIdx, ipIdx),
-					ib.EA{},
-				)
+				addr, err := objMgr.CreateARecord(splitIP[1], "", fmt.Sprintf("%s-%d-%d", vm.Name, deviceIdx, ipIdx), splitIP[2], "", ib.EA{})
+				//addr, err := objMgr.AllocateIP(
+				//	splitIP[1],
+				//	splitIP[2],
+				//	"",
+				//	"",
+				//	fmt.Sprintf("%s-%d-%d", vm.Name, deviceIdx, ipIdx),
+				//	ib.EA{},
+				//)
 				if err != nil {
 					return err
 				}
-				device.IPAddrs[ipIdx] = addr.IPAddress
-				ipAddrAnnotation = append(ipAddrAnnotation, ip)
+				device.IPAddrs[ipIdx] = addr.Ipv4Addr
+				ipAddrAnnotation = append(ipAddrAnnotation, addr.Ref)
 			}
 		}
 	}
@@ -138,9 +139,10 @@ func (w *Webhook) populateIPs(vm *v1alpha3.VSphereMachine, objMgr infobloxObject
 func (w *Webhook) cleanupIPs(vm *v1alpha3.VSphereMachine, objMgr infobloxObjectManager) error {
 	ipAddrsToRemove := strings.Split(vm.Annotations[w.InfobloxAnnotation], ",")
 	for _, ip := range ipAddrsToRemove {
-		splitIP := strings.Split(ip, ":")
-		_, err := objMgr.ReleaseIP(splitIP[1], splitIP[2], splitIP[0], ib.MACADDR_ZERO)
+		_, err := objMgr.DeleteARecord(ip)
 		if err != nil {
+			// TODO: Deal with some records deleted, some not? What error is returned from InfoBlox if a record is
+			// already deleted? We can probably ignore that.
 			return err
 		}
 	}
