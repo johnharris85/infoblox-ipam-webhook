@@ -21,7 +21,7 @@ func (objMgr *ObjectManager) AllocateIP(netview, cidr, _, _, name string, ea ib.
 		Name:        name,
 		Ea:          ea,
 		Ref:         fmt.Sprintf("%s%s", netview, name),
-		IPAddress:   "0.0.0.0/32",
+		IPAddress:   "0.0.0.0",
 	}, nil
 }
 
@@ -35,7 +35,7 @@ func (objMgr *ObjectManager) CreateARecord(netview string, dnsview string, recor
 		Name:     recordname,
 		Ea:       ea,
 		Ref:      fmt.Sprintf("%s%s", netview, recordname),
-		Ipv4Addr: "0.0.0.0/32"}, nil
+		Ipv4Addr: "0.0.0.0"}, nil
 }
 
 func (objMgr *ObjectManager) DeleteARecord(ref string) (string, error) {

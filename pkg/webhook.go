@@ -16,79 +16,71 @@ package pkg
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net/http"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
-
+	"github.com/davecgh/go-spew/spew"
 	ib "github.com/infobloxopen/infoblox-go-client"
 	admissionv1beta1 "k8s.io/api/admission/v1beta1"
-	corev1 "k8s.io/api/core/v1"
+	"net/http"
 	"sigs.k8s.io/cluster-api-provider-vsphere/api/v1alpha3"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	"strings"
 )
 
 // +kubebuilder:webhook:path=/infoblox-ipam,mutating=true,failurePolicy=fail,groups="infrastructure.cluster.x-k8s.io",resources=vspheremachines,verbs=create;delete,versions=v1alpha3,name=mutating.infoblox.ipam.vspheremachines.infrastructure.cluster.x-k8s.io
 
-var log = logf.Log.WithName("infoblox-webhook")
+var logger = logf.Log.WithName("infoblox-webhook")
 
-type Webhook struct {
-	Client             client.Client
-	InfobloxConnector  *ib.Connector
-	InfobloxConfigMap  *corev1.ConfigMap
+type InfoBloxIPAM struct {
+	InfobloxObjMgr     infobloxObjectManager
 	InfobloxAnnotation string
 	InfobloxPrefix     string
 	decoder            *admission.Decoder
 }
 
 // Handle
-func (w *Webhook) Handle(ctx context.Context, req admission.Request) admission.Response {
+func (in *InfoBloxIPAM) Handle(_ context.Context, req admission.Request) admission.Response {
+	logf.SetLogger(zap.Logger(false))
+	log := logger.WithName("handler")
+	spew.Dump("req", req)
 	vm := &v1alpha3.VSphereMachine{}
-	err := w.decoder.Decode(req, vm)
-	if err != nil {
-		return admission.Errored(http.StatusBadRequest, err)
-	}
 
-	log.V(5).Info(fmt.Sprintf("captured %s request for %s", req.Operation, vm.Name))
-
-	// Escape as soon as we can if we shouldn't handle the delete request
-	_, ok := vm.Annotations[w.InfobloxAnnotation]
-	if req.Operation == admissionv1beta1.Delete && !ok {
-		// marshaledVM, err := json.Marshal(vm)
-		//if err != nil {
-		//	return admission.Errored(http.StatusBadRequest, err)
-		//}
-		log.V(2).Info("delete operation and no annotation found")
-		return admission.Allowed("")
-	}
-
-	// Escape as soon as we can if we shouldn't handle the create request.
-	var ipsContainInfobloxPrefix bool
-	for _, device := range vm.Spec.VirtualMachineCloneSpec.Network.Devices {
-		for _, ip := range device.IPAddrs {
-			log.V(4).Info(fmt.Sprintf("checking IP: %s", ip))
-			if strings.Split(ip, ":")[0] == w.InfobloxPrefix {
-				ipsContainInfobloxPrefix = true
+	switch req.Operation {
+	case admissionv1beta1.Create:
+		err := in.decoder.DecodeRaw(req.Object, vm)
+		if err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		var ipsContainInfobloxPrefix bool
+		for _, device := range vm.Spec.VirtualMachineCloneSpec.Network.Devices {
+			for _, ip := range device.IPAddrs {
+				log.Info(fmt.Sprintf("checking IP: %s", ip))
+				if strings.Split(ip, ":")[0] == in.InfobloxPrefix {
+					ipsContainInfobloxPrefix = true
+				}
 			}
 		}
-	}
 
-	if !ipsContainInfobloxPrefix {
-		log.V(2).Info("create operation and no IPs with prefix found")
-		return admission.Allowed("")
-	}
-
-	objMgr := ib.NewObjectManager(w.InfobloxConnector, w.InfobloxConfigMap.Data["cmpType"], w.InfobloxConfigMap.Data["tenantID"])
-
-	if req.Operation == admissionv1beta1.Create {
-		w.populateIPs(vm, objMgr)
-		log.V(5).Info(fmt.Sprintf("after create - %v", vm))
-	}
-
-	if req.Operation == admissionv1beta1.Delete {
-		w.cleanupIPs(vm, objMgr)
-		log.V(5).Info(fmt.Sprintf("after delete - %v", vm))
+		if !ipsContainInfobloxPrefix {
+			log.Info("create operation and no IPs with prefix found")
+			return admission.Allowed("")
+		}
+		in.populateIPs(vm)
+	case admissionv1beta1.Delete:
+		err := in.decoder.DecodeRaw(req.OldObject, vm)
+		if err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		_, ok := vm.Annotations[in.InfobloxAnnotation]
+		if !ok {
+			log.Info("delete operation and no annotation found")
+			return admission.Allowed("")
+		}
+		in.cleanupIPs(vm)
+	default:
+		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("unsupported operation: %s", req.Operation))
 	}
 
 	marshaledVM, err := json.Marshal(vm)
@@ -96,34 +88,41 @@ func (w *Webhook) Handle(ctx context.Context, req admission.Request) admission.R
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 
-	return admission.PatchResponseFromRaw(req.Object.Raw, marshaledVM)
+	var response admission.Response
+
+	switch req.Operation {
+	case admissionv1beta1.Create:
+		response = admission.PatchResponseFromRaw(req.Object.Raw, marshaledVM)
+	case admissionv1beta1.Delete:
+		response = admission.Allowed("")
+	default:
+		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("unsupported operation: %s", req.Operation))
+	}
+
+	spew.Dump("response", response)
+	return response
 }
 
 // InjectDecoder injects the decoder.
-func (w *Webhook) InjectDecoder(d *admission.Decoder) error {
-	w.decoder = d
+func (in *InfoBloxIPAM) InjectDecoder(d *admission.Decoder) error {
+	in.decoder = d
 	return nil
 }
 
-func (w *Webhook) populateIPs(vm *v1alpha3.VSphereMachine, objMgr infobloxObjectManager) error {
+func (in *InfoBloxIPAM) populateIPs(vm *v1alpha3.VSphereMachine) error {
 	if vm.Annotations == nil {
-		vm.Annotations = map[string]string{w.InfobloxAnnotation: ""}
+		vm.Annotations = map[string]string{in.InfobloxAnnotation: ""}
 	}
 	var ipAddrAnnotation []string
 	for deviceIdx, device := range vm.Spec.VirtualMachineCloneSpec.Network.Devices {
 		for ipIdx, ip := range device.IPAddrs {
 			if strings.HasPrefix(ip, "infoblox") {
-				// Format - "infoblox:<netview>:<cidr>" TODO: Do we need DNSView?
-				splitIP := strings.Split(ip, ":")
-				addr, err := objMgr.CreateARecord(splitIP[1], "", fmt.Sprintf("%s-%d-%d", vm.Name, deviceIdx, ipIdx), splitIP[2], "", ib.EA{})
-				//addr, err := objMgr.AllocateIP(
-				//	splitIP[1],
-				//	splitIP[2],
-				//	"",
-				//	"",
-				//	fmt.Sprintf("%s-%d-%d", vm.Name, deviceIdx, ipIdx),
-				//	ib.EA{},
-				//)
+				// Format - "infoblox:<netview>:<dnsview>:<cidr>"
+				netview, cidr, dnsview, err := parseInfobloxIPString(ip)
+				if err != nil {
+					return err //TODO: idempotency? what about if it already exists / doesn't create all first time?
+				}
+				addr, err := in.InfobloxObjMgr.CreateARecord(netview, dnsview, fmt.Sprintf("%s-%d-%d", vm.Name, deviceIdx, ipIdx), cidr, "", ib.EA{})
 				if err != nil {
 					return err
 				}
@@ -132,20 +131,27 @@ func (w *Webhook) populateIPs(vm *v1alpha3.VSphereMachine, objMgr infobloxObject
 			}
 		}
 	}
-	vm.Annotations[w.InfobloxAnnotation] = strings.Join(ipAddrAnnotation, ",")
+	vm.Annotations[in.InfobloxAnnotation] = strings.Join(ipAddrAnnotation, ",")
 	return nil
 }
 
-func (w *Webhook) cleanupIPs(vm *v1alpha3.VSphereMachine, objMgr infobloxObjectManager) error {
-	ipAddrsToRemove := strings.Split(vm.Annotations[w.InfobloxAnnotation], ",")
-	for _, ip := range ipAddrsToRemove {
-		_, err := objMgr.DeleteARecord(ip)
+func (in *InfoBloxIPAM) cleanupIPs(vm *v1alpha3.VSphereMachine) error {
+	recordsToRemove := strings.Split(vm.Annotations[in.InfobloxAnnotation], ",")
+	for _, recordRef := range recordsToRemove {
+		_, err := in.InfobloxObjMgr.DeleteARecord(recordRef)
 		if err != nil {
 			// TODO: Deal with some records deleted, some not? What error is returned from InfoBlox if a record is
 			// already deleted? We can probably ignore that.
 			return err
 		}
 	}
-	delete(vm.Annotations, w.InfobloxAnnotation)
 	return nil
+}
+
+func parseInfobloxIPString(marker string) (string, string, string, error) {
+	splitIP := strings.Split(marker, ":")
+	if len(splitIP) != 4 {
+		return "", "", "", errors.New("not a valid infoblox string")
+	}
+	return splitIP[1], splitIP[2], splitIP[3], nil
 }

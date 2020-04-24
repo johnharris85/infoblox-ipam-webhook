@@ -18,9 +18,11 @@ import (
 	"flag"
 	ib "github.com/infobloxopen/infoblox-go-client"
 	ipam "github.com/johnharris85/infoblox-ipam-webhook/pkg"
+	"github.com/johnharris85/infoblox-ipam-webhook/pkg/mocks"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"os"
+	//"sigs.k8s.io/cluster-api-provider-vsphere/api/v1alpha3"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -98,7 +100,7 @@ func main() {
 	entryLog.Info("setting up webhook server")
 	hookServer := mgr.GetWebhookServer()
 
-	k8sClient := mgr.GetClient()
+	k8sClient := mgr.GetAPIReader()
 
 	sec := corev1.Secret{}
 	secret := types.NamespacedName{
@@ -129,11 +131,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	objMgr := ib.NewObjectManager(conn, cm.Data["cmpType"], cm.Data["tenantID"])
+
+	//objMgr := mocks.NewObjectManager()
+
+	//err = v1alpha3.AddToScheme(mgr.GetScheme())
+
 	entryLog.Info("registering webhooks to the webhook server")
-	hookServer.Register("/infoblox-ipam", &webhook.Admission{Handler: &ipam.Webhook{
-		Client:             k8sClient,
-		InfobloxConnector:  conn,
-		InfobloxConfigMap:  &cm,
+	hookServer.Register("/infoblox-ipam", &webhook.Admission{Handler: &ipam.InfoBloxIPAM{
+		InfobloxObjMgr:     objMgr,
 		InfobloxAnnotation: infobloxAnnotation,
 		InfobloxPrefix:     infobloxPrefix,
 	}})
