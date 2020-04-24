@@ -18,7 +18,7 @@ import (
 	"flag"
 	ib "github.com/infobloxopen/infoblox-go-client"
 	ipam "github.com/johnharris85/infoblox-ipam-webhook/pkg"
-	"github.com/johnharris85/infoblox-ipam-webhook/pkg/mocks"
+	//"github.com/johnharris85/infoblox-ipam-webhook/pkg/mocks"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"os"
@@ -159,7 +159,7 @@ func setupInfobloxConnector(config corev1.ConfigMap, secret corev1.Secret) (*ib.
 		Username: string(secret.Data["username"]),
 		Password: string(secret.Data["password"]),
 	}
-	transportConfig := ib.NewTransportConfig("true", 20, 10)
+	transportConfig := ib.NewTransportConfig("false", 20, 10)
 	requestBuilder := &ib.WapiRequestBuilder{}
 	requestor := &ib.WapiHttpRequestor{}
 	return ib.NewConnector(hostConfig, transportConfig, requestBuilder, requestor)

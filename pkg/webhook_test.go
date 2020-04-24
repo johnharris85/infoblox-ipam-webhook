@@ -90,7 +90,7 @@ var _ = Describe("Method tests", func() {
 							NetworkName: "network_test",
 							DHCP4:       false,
 							DHCP6:       false,
-							IPAddrs:     []string{"infoblox:somenetview:somednsview:somecidr", "notus", "infoblox:somenetview:somednsview:somecidr"},
+							IPAddrs:     []string{"infoblox:somenetview:somednsview:somecidr/23:test.com", "notus", "infoblox:somenetview:somednsview:somecidr/23:test.com"},
 						},
 						}},
 					NumCPUs:   3,
@@ -100,8 +100,8 @@ var _ = Describe("Method tests", func() {
 			},
 		}
 		_ = w.populateIPs(&vm)
-		Expect(vm.Spec.Network.Devices[0].IPAddrs[0]).To(Equal("0.0.0.0"))
-		Expect(vm.Spec.Network.Devices[0].IPAddrs[2]).To(Equal("0.0.0.0"))
-		Expect(vm.Annotations["a"]).To(Equal("somenetviewvmname-0-0,somenetviewvmname-0-2"))
+		Expect(vm.Spec.Network.Devices[0].IPAddrs[0]).To(Equal("0.0.0.0/23"))
+		Expect(vm.Spec.Network.Devices[0].IPAddrs[2]).To(Equal("0.0.0.0/23"))
+		Expect(vm.Annotations["a"]).To(Equal("somenetview,somenetview"))
 	})
 })

@@ -50,6 +50,7 @@ func (in *InfoBloxIPAM) Handle(_ context.Context, req admission.Request) admissi
 	switch req.Operation {
 	case admissionv1beta1.Create:
 		err := in.decoder.DecodeRaw(req.Object, vm)
+		spew.Dump("Create", vm)
 		if err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
@@ -67,9 +68,13 @@ func (in *InfoBloxIPAM) Handle(_ context.Context, req admission.Request) admissi
 			log.Info("create operation and no IPs with prefix found")
 			return admission.Allowed("")
 		}
-		in.populateIPs(vm)
+		err = in.populateIPs(vm)
+		if err != nil {
+			return admission.Errored(http.StatusInternalServerError, err)
+		}
 	case admissionv1beta1.Delete:
 		err := in.decoder.DecodeRaw(req.OldObject, vm)
+		spew.Dump("Delete", vm)
 		if err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
@@ -78,7 +83,10 @@ func (in *InfoBloxIPAM) Handle(_ context.Context, req admission.Request) admissi
 			log.Info("delete operation and no annotation found")
 			return admission.Allowed("")
 		}
-		in.cleanupIPs(vm)
+		err = in.cleanupIPs(vm)
+		if err != nil {
+			return admission.Errored(http.StatusInternalServerError, err)
+		}
 	default:
 		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("unsupported operation: %s", req.Operation))
 	}
@@ -114,19 +122,24 @@ func (in *InfoBloxIPAM) populateIPs(vm *v1alpha3.VSphereMachine) error {
 		vm.Annotations = map[string]string{in.InfobloxAnnotation: ""}
 	}
 	var ipAddrAnnotation []string
-	for deviceIdx, device := range vm.Spec.VirtualMachineCloneSpec.Network.Devices {
+	for _, device := range vm.Spec.VirtualMachineCloneSpec.Network.Devices {
 		for ipIdx, ip := range device.IPAddrs {
 			if strings.HasPrefix(ip, "infoblox") {
-				// Format - "infoblox:<netview>:<dnsview>:<cidr>"
-				netview, cidr, dnsview, err := parseInfobloxIPString(ip)
+				// Format - "infoblox:<netview>:<dnsview>:<cidr>:<domainname>"
+				netview, dnsview, cidr, domainName, err := parseInfobloxIPString(ip)
 				if err != nil {
 					return err //TODO: idempotency? what about if it already exists / doesn't create all first time?
 				}
-				addr, err := in.InfobloxObjMgr.CreateARecord(netview, dnsview, fmt.Sprintf("%s-%d-%d", vm.Name, deviceIdx, ipIdx), cidr, "", ib.EA{})
+
+				addr, err := in.InfobloxObjMgr.CreateARecord(netview, dnsview, fmt.Sprintf("%s.%s", vm.Name, domainName), cidr, "", ib.EA{})
 				if err != nil {
 					return err
 				}
-				device.IPAddrs[ipIdx] = addr.Ipv4Addr
+				aRec, err := in.InfobloxObjMgr.GetARecordByRef(addr.Ref)
+				if err != nil {
+					return err
+				}
+				device.IPAddrs[ipIdx] = fmt.Sprintf("%s/%s", aRec.Ipv4Addr, strings.Split(cidr, "/")[1])
 				ipAddrAnnotation = append(ipAddrAnnotation, addr.Ref)
 			}
 		}
@@ -148,10 +161,10 @@ func (in *InfoBloxIPAM) cleanupIPs(vm *v1alpha3.VSphereMachine) error {
 	return nil
 }
 
-func parseInfobloxIPString(marker string) (string, string, string, error) {
+func parseInfobloxIPString(marker string) (string, string, string, string, error) {
 	splitIP := strings.Split(marker, ":")
-	if len(splitIP) != 4 {
-		return "", "", "", errors.New("not a valid infoblox string")
+	if len(splitIP) != 5 {
+		return "", "", "", "", errors.New("not a valid infoblox string")
 	}
-	return splitIP[1], splitIP[2], splitIP[3], nil
+	return splitIP[1], splitIP[2], splitIP[3], splitIP[4], nil
 }
